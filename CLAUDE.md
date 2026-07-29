@@ -4,133 +4,148 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-compress-lzf is a Java library for encoding and decoding data in LZF format. It implements the LZF compression algorithm, optimized for speed with modest compression. The format is 100% compatible with the original C liblzf library.
+compress-lzf (Maven coordinates `com.ning:compress-lzf`) is a Java library for encoding and decoding
+data in LZF format. It uses the *original* LZF data format, so it is 100% compatible with C `liblzf`
+and command-line `lzf` tools — note that some other Java adaptations (e.g. H2 database's) use the same
+internal block compression but different block identifiers, so they are NOT interchangeable.
 
 **Key characteristics:**
-- Pure Java implementation with no external dependencies
-- Requires JDK 8+
-- Supports both "safe" (JDK-only) and "unsafe" (sun.misc.Unsafe) implementations for performance
-- Block-oriented compression (max 64KB chunks) enabling parallel processing
-- Module name: `com.ning.compress.lzf` (JPMS support since 1.1)
+- Pure Java, no external runtime dependencies; JDK 8 source/target level
+- Both "safe" (JDK-only) and "optimal" (`sun.misc.Unsafe`) implementations of encoders/decoders
+- Block-oriented compression (max 64kB chunks, no cross-chunk back-references) which enables parallel encoding
+- JPMS module name `com.ning.compress.lzf`; jar is also an OSGi bundle and an executable CLI
 
 ## Build and Development Commands
 
-### Building
 ```bash
-./mvnw clean install         # Build and install to local Maven repo
-./mvnw verify                # Build and run tests
-./mvnw package               # Build JAR without installing
+./mvnw clean install         # Build, test, install to local Maven repo (default goal is `install`)
+./mvnw verify                # Build + tests + javadoc jar (what CI runs)
+./mvnw test                  # Run tests only (JUnit 5 / Jupiter)
+./mvnw test -Dtest=TestLZFRoundTrip                    # Single test class
+./mvnw test -Dtest=TestLZFRoundTrip#testHamletZ        # Single test method
+./mvnw javadoc:javadoc       # Javadocs -> target/site/apidocs/
 ```
 
-### Testing
+### Fuzz testing (Jazzer)
+
+Fuzz tests live in `TestFuzzUnsafeLZF` and only run under the `fuzz` profile, which **disables the
+normal unit tests** and runs each fuzz method as a separate surefire execution:
+
 ```bash
-./mvnw test                  # Run all tests
-./mvnw test -Dtest=TestClassName # Run specific test class
-./mvnw test -Dtest=TestClassName#methodName  # Run specific test method
+./mvnw --activate-profiles fuzz test
 ```
 
-### Code Quality
+Because of a Jazzer limitation, each new fuzz test *method* must be listed explicitly as its own
+`<execution>` in the `fuzz` profile in `pom.xml` — adding a method without that means it never runs.
+Failing fuzz inputs are written under `src/test/resources/**/*Inputs/` (CI uploads them as artifacts).
+
+### Manual performance testing
+
+The `run-*` / `profile-*` shell scripts run `perf.Manual*` classes directly off `target/classes` and
+`target/test-classes`, so compile first (`./mvnw test-compile` or a full build):
+
 ```bash
-./mvnw javadoc:javadoc  # Generate Javadocs (output: target/site/apidocs/)
+./run-comp-perf <file>       # perf.ManualCompressComparison
+./run-uncomp-perf <file>     # perf.ManualUncompressComparison
+./run-skip <file>            # perf.ManualSkipComparison
 ```
 
-### Manual Performance Testing
-The repository includes manual performance test scripts:
-```bash
-./run-comp-perf              # Run compression performance test
-./run-uncomp-perf            # Run decompression performance test
-./run-skip                   # Run skip performance test
-```
+`testdata/low-comp-120k.txt` and `src/test/resources/` (shakespeare XML, binary samples) provide inputs.
+`ManualTestLZF` and `ManualUnsafePerf` are also manually-run mains, not part of the test suite.
+
+### CI
+
+GitHub Actions builds with `./mvnw -B -q -ff -ntp verify` on JDK 8, 11, 17 and 21, plus a separate
+fuzzing job on JDK 17. Coverage (jacoco) is published from the JDK 8 run.
 
 ## Code Architecture
 
-### Core Package Structure
+### Packages
 
-**Main packages:**
-- `com.ning.compress` - Base interfaces and utilities (BufferRecycler, DataHandler, Uncompressor)
-- `com.ning.compress.lzf` - Main LZF API and streaming classes
-- `com.ning.compress.lzf.impl` - Implementation details (Vanilla and Unsafe variants)
-- `com.ning.compress.lzf.parallel` - Parallel compression support
-- `com.ning.compress.lzf.util` - Utilities and factory classes
-- `com.ning.compress.gzip` - GZIP-related utilities
+- `com.ning.compress` — cross-format basics: `BufferRecycler`, push-style `Uncompressor`/`DataHandler`
+- `com.ning.compress.lzf` — public API (`LZFEncoder`, `LZFDecoder`, streams, `LZFChunk`) plus the
+  abstract `ChunkEncoder`/`ChunkDecoder`
+- `com.ning.compress.lzf.impl` — concrete Vanilla/Unsafe codecs (implementation detail; OSGi-private)
+- `com.ning.compress.lzf.parallel` — `PLZFOutputStream` and its thread-pool machinery
+- `com.ning.compress.lzf.util` — factories (`ChunkEncoderFactory`, `ChunkDecoderFactory`) and
+  `LZFFileInputStream`/`LZFFileOutputStream`
+- `com.ning.compress.gzip` — unrelated to LZF: buffer-recycling gzip streams and a push-style
+  `GZIPUncompressor`, sharing the same `Uncompressor`/`DataHandler` abstractions
 
-### Key Design Patterns
+### Three parallel API styles
 
-**Two-Tier Implementation Strategy:**
-The library provides both "safe" and "optimal" (typically unsafe) implementations:
-- **Safe**: Uses only standard JDK APIs, works on all platforms
-- **Optimal**: May use `sun.misc.Unsafe` for performance (4-5% faster encoding, 10-15% faster decoding)
+1. **Block**: `LZFEncoder.encode(...)` / `LZFDecoder.decode(...)`, with `safeEncode`/`safeDecode`
+   variants that force the JDK-only codec.
+2. **Streaming**: `LZFOutputStream`, `LZFInputStream`, `LZFCompressingInputStream` (compresses while
+   being read), `PLZFOutputStream` for multi-threaded compression.
+3. **Push**: `LZFUncompressor` / `GZIPUncompressor` feed decompressed data to a `DataHandler` as
+   compressed data arrives — for async/non-blocking callers. Both `feedCompressedData` and
+   `handleData` return `boolean` to signal "stop feeding me".
 
-Access via factory methods:
-- `ChunkEncoderFactory.safeInstance()` vs `ChunkEncoderFactory.optimalInstance()`
-- `ChunkDecoderFactory.safeInstance()` vs `ChunkDecoderFactory.optimalInstance()`
+New public functionality generally needs to be reachable from all three where it makes sense.
 
-**Chunk-Based Processing:**
-Data is processed in chunks (max 64KB = `LZFChunk.MAX_CHUNK_LEN`):
-1. Input split into chunks
-2. Each chunk compressed independently (can be parallelized)
-3. Chunks combined into output stream/array
-4. Uncompressible chunks stored as-is with different header
+### Safe vs optimal codec selection
 
-**Buffer Recycling:**
-`BufferRecycler` class enables buffer reuse to reduce GC pressure. Encoders/decoders implement `Closeable` to return buffers to the pool.
+`ChunkDecoderFactory.optimalInstance()` resolves `UnsafeChunkDecoder` via `Class.forName` in a static
+initializer and silently falls back to `VanillaChunkDecoder` on any `Throwable`;
+`ChunkEncoderFactory.optimalInstance()` catches exceptions from `UnsafeChunkEncoders.createEncoder`
+and falls back to `VanillaChunkEncoder`. So "optimal" must never hard-fail on odd platforms — keep
+the fallback paths intact when touching these.
 
-### Main Entry Points
-
-**Block API (byte arrays):**
-- `LZFEncoder.encode(byte[])` - Compress data
-- `LZFDecoder.decode(byte[])` - Decompress data
-- Both have `safe*` variants for guaranteed JDK-only implementations
-
-**Streaming API:**
-- `LZFOutputStream` - Compress while writing
-- `LZFInputStream` - Decompress while reading
-- `LZFCompressingInputStream` - Wrap input stream with compression
-
-**Parallel Processing:**
-- `PLZFOutputStream` - Parallel compression using thread pool
-
-**Low-level API:**
-- `ChunkEncoder` - Encodes individual chunks (abstract class)
-- `ChunkDecoder` - Decodes individual chunks (abstract class)
-- Implementations: `VanillaChunkEncoder`, `UnsafeChunkEncoder`, etc. in `impl` package
-
-### Implementation Hierarchy
-
-**Encoders:**
 ```
-ChunkEncoder (abstract)
-├── VanillaChunkEncoder (safe, pure Java)
-└── UnsafeChunkEncoder (uses sun.misc.Unsafe)
-    ├── UnsafeChunkEncoderLE (little-endian optimized)
-    └── UnsafeChunkEncoderBE (big-endian optimized)
-```
+ChunkEncoder (abstract; hashing, chunk splitting, output framing)
+├── VanillaChunkEncoder          (pure Java)
+└── UnsafeChunkEncoder           (sun.misc.Unsafe)
+    ├── UnsafeChunkEncoderLE     (tryCompress() specialized per native byte order)
+    └── UnsafeChunkEncoderBE
 
-**Decoders:**
-```
 ChunkDecoder (abstract)
-├── VanillaChunkDecoder (safe, pure Java)
-└── UnsafeChunkDecoder (uses sun.misc.Unsafe)
+├── VanillaChunkDecoder
+└── UnsafeChunkDecoder
 ```
 
-### Important Constraints
+**Any change to the match-finding/encoding loop must be mirrored in three places**:
+`VanillaChunkEncoder.tryCompress`, `UnsafeChunkEncoderLE.tryCompress`, and
+`UnsafeChunkEncoderBE.tryCompress`. LE and BE differ only in how multi-byte reads are assembled; they
+must produce identical output (a past bug, #64, was exactly a divergence between them). Round-trip
+tests catch Vanilla/Unsafe divergence only if both variants are exercised.
 
-1. **Chunk Size**: Maximum uncompressed chunk is 64KB (`LZFChunk.MAX_CHUNK_LEN = 65535`)
-2. **Hash Window**: Compression uses 8KB back-reference window (`MAX_OFF = 8192`)
-3. **Thread Safety**: `ChunkEncoder` and `ChunkDecoder` instances are NOT thread-safe (stateful)
-4. **Buffer Management**: Always call `.close()` on encoders/decoders to return buffers to recycler
+Unsafe codecs must validate arguments before touching memory (`_checkArrayIndices`,
+`_checkOutputLength` in `UnsafeChunkEncoder`) — bad indices would otherwise corrupt the heap rather
+than throw. Do not weaken or skip these checks. `UnsafeChunkEncoder` is deliberately non-subclassable
+outside the package.
 
-### Format Compatibility
+### Chunk format and encoding constraints
 
-This implementation uses the **original LZF format** (compatible with C liblzf), which differs from some other Java adaptations (like H2 database's variant) in block identifiers, though the internal compression structure is identical.
+Framing lives entirely in `LZFChunk`: every chunk starts `'Z' 'V'`, then a type byte
+(`BLOCK_TYPE_COMPRESSED`=1, `BLOCK_TYPE_NON_COMPRESSED`=0); compressed chunks have a 7-byte header
+(encoded length, then original length, both big-endian 16-bit), uncompressed ones a 5-byte header.
 
-## Module System (JPMS)
+- `LZFChunk.MAX_CHUNK_LEN` = 0xFFFF — length fields are 2 bytes, so chunks cannot grow past 64kB
+- `ChunkEncoder.MAX_OFF` = 8192 — back-reference window
+- `ChunkEncoder.MIN_BLOCK_TO_COMPRESS` = 16 — smaller input is stored as-is
+- `LZFChunk.MAX_LITERAL` = 32 — max literal run
+- A chunk is emitted compressed only if compression actually shrinks it (header overhead included)
 
-The project uses Moditect plugin to add `module-info.class` for Java 9+ compatibility while maintaining Java 8 build compatibility. Module definition is in `src/moditect/module-info.java`.
+### Buffer recycling and lifetime
 
-**Module requires:**
-- `java.xml` (transitive)
-- `jdk.unsupported` (for sun.misc.Unsafe access)
+`BufferRecycler.instance()` returns a `ThreadLocal<SoftReference<BufferRecycler>>`-held instance, and
+encoders/decoders borrow encoding/output/input/decode buffers and the encoding hash table from it.
+`ChunkEncoder`/`ChunkDecoder` are stateful and **not thread-safe**, and implement `Closeable`; failing
+to `close()` leaks the buffers out of the pool. Factory methods also accept an explicit
+`BufferRecycler` for callers that manage pooling themselves (`PLZFOutputStream` does).
 
-**Module exports:**
-- All public packages except `com.ning.compress.lzf.impl` (though currently exported for compatibility)
+## Metadata kept in sync by hand
+
+Adding, renaming, or removing a package requires updating several files that are not derived from the
+source tree:
+
+- `src/moditect/module-info.java` — hand-written module descriptor, woven in at `package` phase by the
+  Moditect plugin (this is how a JDK 8 build ships a Java 9+ `module-info.class`). Requires
+  `jdk.unsupported` for `sun.misc.Unsafe`.
+- `pom.xml` `maven-bundle-plugin` config — OSGi `Private-Package` lists `com.ning.compress.lzf.impl`,
+  and `sun.misc` is declared an optional import. `Main-Class` is `com.ning.compress.lzf.LZF`, which
+  makes the jar runnable as a CLI (`java -jar compress-lzf-<version>.jar -c|-d <file>`).
+
+`VERSION.txt` holds hand-maintained release notes (newest first, `#<issue>` references with
+contributor credit); add an entry there for user-visible changes.
