@@ -105,12 +105,22 @@ public class TestLZFDecoderParity extends BaseForTests
      */
     @Test
     public void testMaxOffsetBackReferenceBoundary() {
+        // Short form: control byte with run length 1 (so 3 bytes) and all 5 offset bits set,
+        // followed by all 8 bits of the low offset byte -- an offset of -8192
+        _testMaxOffsetBackReferences(new byte[] { (byte) 0x3F, (byte) 0xFF }, 3);
+        // Long form: control byte marking a long run with all 5 offset bits set, a run length byte
+        // of 0 (so 9 bytes), then the low offset byte -- also an offset of -8192. Covered
+        // separately because it is checked at a different place in the decoders.
+        _testMaxOffsetBackReferences(new byte[] { (byte) 0xFF, 0x00, (byte) 0xFF }, 9);
+    }
+
+    private void _testMaxOffsetBackReferences(byte[] backRef, int runLength) {
         // one byte short of the maximum offset being reachable: has to be rejected
-        _testMaxOffsetBackReference(MAX_BACK_REF_OFFSET - 1, false);
+        _testMaxOffsetBackReference(backRef, runLength, MAX_BACK_REF_OFFSET - 1, false);
         // exactly at the start of the chunk, and past it: valid
-        _testMaxOffsetBackReference(MAX_BACK_REF_OFFSET, true);
-        _testMaxOffsetBackReference(MAX_BACK_REF_OFFSET + 1, true);
-        _testMaxOffsetBackReference(MAX_BACK_REF_OFFSET + 4096, true);
+        _testMaxOffsetBackReference(backRef, runLength, MAX_BACK_REF_OFFSET, true);
+        _testMaxOffsetBackReference(backRef, runLength, MAX_BACK_REF_OFFSET + 1, true);
+        _testMaxOffsetBackReference(backRef, runLength, MAX_BACK_REF_OFFSET + 4096, true);
     }
 
     /**
@@ -145,7 +155,8 @@ public class TestLZFDecoderParity extends BaseForTests
      */
     private final static int MAX_BACK_REF_OFFSET = 8192;
 
-    private void _testMaxOffsetBackReference(int outputBeforeBackRef, boolean valid)
+    private void _testMaxOffsetBackReference(byte[] backRef, int runLength, int outputBeforeBackRef,
+            boolean valid)
     {
         // Note: content is added after the back-reference so that it is not close to the end of
         // the chunk. Otherwise a decoder would have to check the run length there anyway, which
@@ -153,17 +164,14 @@ public class TestLZFDecoderParity extends BaseForTests
         final int tailLen = 1024;
         byte[] head = _literalRuns(outputBeforeBackRef);
         byte[] tail = _literalRuns(tailLen);
-        byte[] payload = new byte[head.length + 2 + tail.length];
+        byte[] payload = new byte[head.length + backRef.length + tail.length];
         System.arraycopy(head, 0, payload, 0, head.length);
-        // short back-reference, run length 3, with all 5 offset bits of the control byte set ...
-        payload[head.length] = (byte) 0x3F;
-        // ... and all 8 bits of the following byte: an offset of -8192, the largest possible
-        payload[head.length + 1] = (byte) 0xFF;
-        System.arraycopy(tail, 0, payload, head.length + 2, tail.length);
+        System.arraycopy(backRef, 0, payload, head.length, backRef.length);
+        System.arraycopy(tail, 0, payload, head.length + backRef.length, tail.length);
 
-        final int declaredLen = outputBeforeBackRef + 3 + tailLen;
-        String desc = "back-reference with offset -"+MAX_BACK_REF_OFFSET+" at output offset "
-                +outputBeforeBackRef;
+        final int declaredLen = outputBeforeBackRef + runLength + tailLen;
+        String desc = runLength+" byte back-reference with offset -"+MAX_BACK_REF_OFFSET
+                +" at output offset "+outputBeforeBackRef;
 
         for (int chunkOffset : CHUNK_OFFSETS) {
             if (valid) {
@@ -171,7 +179,7 @@ public class TestLZFDecoderParity extends BaseForTests
                 // Copied bytes have to come from exactly 8192 bytes back, which is at or after the
                 // start of the chunk; had they come from before it, they would be the prefill
                 final int copiedFrom = outputBeforeBackRef - MAX_BACK_REF_OFFSET;
-                for (int i = 0; i < 3; ++i) {
+                for (int i = 0; i < runLength; ++i) {
                     assertEquals(output[chunkOffset + copiedFrom + i],
                             output[chunkOffset + outputBeforeBackRef + i],
                             desc+": byte "+i+" of the run was not copied from output offset "+copiedFrom);

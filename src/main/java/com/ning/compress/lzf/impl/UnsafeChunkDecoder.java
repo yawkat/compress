@@ -95,8 +95,10 @@ public class UnsafeChunkDecoder extends ChunkDecoder
 
         // Back-reference offsets and run lengths are bounded, so checks against the start and the
         // end of this chunk's output can only fail near them: in between they are provably
-        // redundant, and skipping them matters because this is the hot path
-        final int offsetChecksBefore = outPos + MAX_BACK_REF_OFFSET;
+        // redundant, and skipping them matters because this is the hot path.
+        // Note: distance from the start is compared as a difference, not against a precomputed
+        // `outPos + MAX_BACK_REF_OFFSET`, since that sum can overflow for a very large output
+        // buffer -- which would silently disable the check for the whole chunk
         final int lengthChecksAfter = outEnd - MAX_BACK_REF_LENGTH;
 
         // We need to take care of end condition, leave last 32 bytes out
@@ -143,7 +145,7 @@ public class UnsafeChunkDecoder extends ChunkDecoder
                 }
                 ctrl -= in[inPos++] & 255;
                 final int copyLength = len + 2;
-                if (outPos < offsetChecksBefore || outPos > lengthChecksAfter) {
+                if ((outPos - outPosStart) < MAX_BACK_REF_OFFSET || outPos > lengthChecksAfter) {
                     if (outPos > outEnd - copyLength || outPos + ctrl < outPosStart) {
                         throw new LZFException("Invalid back reference");
                     }
@@ -165,7 +167,7 @@ public class UnsafeChunkDecoder extends ChunkDecoder
             }
             len = (in[inPos++] & 255) + 9;
             ctrl -= in[inPos++] & 255;
-            if (outPos < offsetChecksBefore || outPos > lengthChecksAfter) {
+            if ((outPos - outPosStart) < MAX_BACK_REF_OFFSET || outPos > lengthChecksAfter) {
                 if (outPos > outEnd - len || outPos + ctrl < outPosStart) {
                     throw new LZFException("Invalid back reference");
                 }
