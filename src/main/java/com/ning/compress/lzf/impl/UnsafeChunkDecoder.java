@@ -350,9 +350,9 @@ public class UnsafeChunkDecoder extends ChunkDecoder
         }
     }    
     private final static void copyLong(byte[] buffer, int inputIndex, int outputIndex, int length,
-            int outputEnd8)
+            int outputEnd32)
     {
-        if ((outputIndex + length) > outputEnd8) {
+        if ((outputIndex + length) > outputEnd32) {
         	copyLongTail(buffer, inputIndex,outputIndex, length);
             return;
         }

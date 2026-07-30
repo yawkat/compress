@@ -53,7 +53,7 @@ public class TestLZFDecoder extends BaseForTests
     }
 
     @Test
-    public void testMalformedShortBackReference() {
+    public void testTruncatedShortBackReference() {
         // Payload (after the 7 byte header) is: `0x00` = literal run of 1 byte (`0x04`),
         // followed by `0x50` = short back-reference, which needs one more byte for its
         // offset -- but the chunk ends. First case has a trailing byte that is outside of
