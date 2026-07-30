@@ -8,6 +8,7 @@ import com.ning.compress.BufferRecycler;
 import com.ning.compress.lzf.impl.*;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.annotation.Retention;
@@ -74,6 +75,12 @@ public class TestFuzzUnsafeLZF {
         assertArrayEquals(decoded1, decoded2);
 
         // Compare with result of vanilla decoder
+        // Note: only comparing decoded content, not the type of failure: `decode()` can pass a
+        // chunk end past the end of the input (for a chunk whose declared compressed length does
+        // not fit), which UnsafeChunkDecoder rejects as an invalid argument
+        // (ArrayIndexOutOfBoundsException) whereas VanillaChunkDecoder reports it as malformed
+        // content (LZFException). See `TestLZFDecoderParity` for the comparison with arguments
+        // that are known to be valid, which does require the same type of failure.
         byte[] decodedVanilla = null;
         try {
             int decodedLen = new VanillaChunkDecoder().decode(input, output);
@@ -162,34 +169,76 @@ public class TestFuzzUnsafeLZF {
 
     @LZFFuzzTest
     void inputStreamRead(byte @NotNull @WithLength(min = 0, max = 32767) [] input, @InRange(min = 1, max = 32767) int readBufferSize) throws IOException {
-        UnsafeChunkDecoder decoder = new UnsafeChunkDecoder();
+        // Compare the two decoder implementations: they have to produce the same content, and
+        // fail the same way. Note that the stream path reaches `decodeChunk(InputStream, ...)`
+        // and `skipOrDecodeChunk(...)`, which are implemented separately by each decoder.
+        Outcome vanilla = readOutcome(new VanillaChunkDecoder(), input, readBufferSize);
+        Outcome unsafe = readOutcome(new UnsafeChunkDecoder(), input, readBufferSize);
+        assertEquals(vanilla.failure, unsafe.failure);
+        assertArrayEquals(vanilla.content, unsafe.content);
+    }
+
+    private static Outcome readOutcome(ChunkDecoder decoder, byte[] input, int readBufferSize) throws IOException {
+        ByteArrayOutputStream consumed = new ByteArrayOutputStream();
         try (LZFInputStream inputStream = new LZFInputStream(decoder, new ByteArrayInputStream(input), new BufferRecycler(), false)) {
             byte[] readBuffer = new byte[readBufferSize];
-            while (inputStream.read(readBuffer) != -1) {
-                // Do nothing, just consume the data
+            int count;
+            while ((count = inputStream.read(readBuffer)) != -1) {
+                consumed.write(readBuffer, 0, count);
             }
-        } catch (LZFException | ArrayIndexOutOfBoundsException ignored) {
         }
         // TODO: This IndexOutOfBoundsException occurs because LZFInputStream makes an invalid call to ByteArrayInputStream
         //   The reason seems to be that `_inputBuffer` is only MAX_CHUNK_LEN large, but should be `2 + MAX_CHUNK_LEN` to
         //   account for first two bytes encoding the length? (might affect more places in code)
-        catch (IndexOutOfBoundsException ignored) {
+        //   Tolerated here as long as both decoder implementations behave the same way.
+        catch (LZFException | RuntimeException e) {
+            return new Outcome(e.getClass(), consumed.toByteArray());
         }
+        return new Outcome(null, consumed.toByteArray());
     }
 
     @LZFFuzzTest
     void inputStreamSkip(byte @NotNull @WithLength(min = 0, max = 32767) [] input, @InRange(min = 1, max = 32767) int skipCount) throws IOException {
-        UnsafeChunkDecoder decoder = new UnsafeChunkDecoder();
+        Outcome vanilla = skipOutcome(new VanillaChunkDecoder(), input, skipCount);
+        Outcome unsafe = skipOutcome(new UnsafeChunkDecoder(), input, skipCount);
+        assertEquals(vanilla.failure, unsafe.failure);
+        assertEquals(vanilla.skipped, unsafe.skipped);
+    }
+
+    private static Outcome skipOutcome(ChunkDecoder decoder, byte[] input, int skipCount) throws IOException {
+        long skipped = 0L;
         try (LZFInputStream inputStream = new LZFInputStream(decoder, new ByteArrayInputStream(input), new BufferRecycler(), false)) {
-            while (inputStream.skip(skipCount) > 0) {
-                // Do nothing, just consume the data
+            long count;
+            while ((count = inputStream.skip(skipCount)) > 0) {
+                skipped += count;
             }
-        } catch (LZFException ignored) {
         }
-        // TODO: This IndexOutOfBoundsException occurs because LZFInputStream makes an invalid call to ByteArrayInputStream
-        //   The reason seems to be that `_inputBuffer` is only MAX_CHUNK_LEN large, but should be `2 + MAX_CHUNK_LEN` to
-        //   account for first two bytes encoding the length? (might affect more places in code)
-        catch (IndexOutOfBoundsException ignored) {
+        // TODO: see `readOutcome` above for the IndexOutOfBoundsException case
+        catch (LZFException | RuntimeException e) {
+            return new Outcome(e.getClass(), skipped);
+        }
+        return new Outcome(null, skipped);
+    }
+
+    /**
+     * Outcome of consuming content with one specific decoder implementation: what was produced,
+     * and how (or whether) it failed. Used to compare the implementations against each other.
+     */
+    private static class Outcome {
+        final Class<?> failure;
+        final byte[] content;
+        final long skipped;
+
+        Outcome(Class<?> failure, byte[] content) {
+            this.failure = failure;
+            this.content = content;
+            this.skipped = 0L;
+        }
+
+        Outcome(Class<?> failure, long skipped) {
+            this.failure = failure;
+            this.content = null;
+            this.skipped = skipped;
         }
     }
 
