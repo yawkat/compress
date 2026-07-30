@@ -111,7 +111,7 @@ public class VanillaChunkDecoder extends ChunkDecoder
                 throw new LZFException("Invalid back reference");
             }
 
-            // First: if there is no overlap, can just use arraycopy:
+            // First: if there is no overlap, can just use bulk copy:
             if ((ctrl + len) < -9) {
                 len += 9;
                 if (len <= 32) {

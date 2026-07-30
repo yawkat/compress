@@ -147,7 +147,7 @@ public class UnsafeChunkDecoder extends ChunkDecoder
             if (outPos > outEnd - len || outPos + ctrl < outPosStart) {
                 throw new LZFException("Invalid back reference");
             }
-            // First: ovelapping case can't use default handling, off line.
+            // First: overlapping case can't use default handling, handled off-line.
             if ((ctrl > -9) || (outPos > outputEnd32)) {
                 outPos = copyOverlappingLong(out, outPos, ctrl, len-9);
                 continue;

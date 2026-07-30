@@ -144,6 +144,11 @@ public abstract class ChunkDecoder
      * <p>For backward compatibility this method just delegates to {@link #decodeChunk(byte[], int, byte[], int, int)},
      * ignoring the {@code inEnd} parameter. Subclasses should override it and consider the {@code inEnd} parameter.
      *
+     * @throws LZFException If content is not valid LZF: this includes truncated content, as well as
+     *   back references that would point before start of the chunk's output, or produce more output
+     *   than {@code outEnd - outPos} bytes. Note that invalid arguments (as opposed to invalid
+     *   content) are instead reported as {@link ArrayIndexOutOfBoundsException}.
+     *
      * @since 1.2
      */
     public void decodeChunk(byte[] in, int inPos, int inEnd, byte[] out, int outPos, int outEnd)
