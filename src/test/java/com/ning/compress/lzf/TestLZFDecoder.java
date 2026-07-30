@@ -78,6 +78,36 @@ public class TestLZFDecoder extends BaseForTests
     }
 
     @Test
+    public void testTruncatedBlocks() {
+        // Note: `decode(byte[])` validates framing up front, via `calculateUncompressedSize()`.
+        // These go through the overload that takes a target buffer, which does not -- so the
+        // framing loop itself has to check that header and content fit within the input.
+        byte[][] truncatedInputs = new byte[][] {
+                // signature only: no type, no length
+                { LZFChunk.BYTE_Z, LZFChunk.BYTE_V },
+                // ... type but no length
+                { LZFChunk.BYTE_Z, LZFChunk.BYTE_V, LZFChunk.BLOCK_TYPE_COMPRESSED },
+                // ... only one of the two length bytes
+                { LZFChunk.BYTE_Z, LZFChunk.BYTE_V, LZFChunk.BLOCK_TYPE_COMPRESSED, 0 },
+                // compressed block without the 2 bytes of uncompressed length
+                { LZFChunk.BYTE_Z, LZFChunk.BYTE_V, LZFChunk.BLOCK_TYPE_COMPRESSED, 0, 2, 0 },
+                // compressed block declaring 2 bytes of content, but only 1 included
+                { LZFChunk.BYTE_Z, LZFChunk.BYTE_V, LZFChunk.BLOCK_TYPE_COMPRESSED, 0, 2, 0, 0, 0 },
+                // non-compressed block declaring 10 bytes of content, but only 2 included
+                { LZFChunk.BYTE_Z, LZFChunk.BYTE_V, LZFChunk.BLOCK_TYPE_NON_COMPRESSED, 0, 10, 0x41, 0x42 },
+        };
+
+        for (int i = 0; i < truncatedInputs.length; ++i) {
+            final byte[] input = truncatedInputs[i];
+            String desc = "truncated input #"+i+" (length "+input.length+")";
+            assertThrows(LZFException.class, () ->
+                    ChunkDecoderFactory.safeInstance().decode(input, 0, input.length, new byte[64]), desc);
+            assertThrows(LZFException.class, () ->
+                    ChunkDecoderFactory.optimalInstance().decode(input, 0, input.length, new byte[64]), desc);
+        }
+    }
+
+    @Test
     public void testBackRefBeforeChunkStart() {
         _testBackRefBeforeChunkStart(ChunkDecoderFactory.safeInstance());
         _testBackRefBeforeChunkStart(ChunkDecoderFactory.optimalInstance());

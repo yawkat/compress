@@ -56,39 +56,43 @@ public class TestFuzzUnsafeLZF {
         System.arraycopy(suffix, 0, input2, input.length, suffix.length);
 
         byte[] decoded1 = null;
+        Class<?> failure1 = null;
         try {
             int decodedLen = decoder.decode(input1, 0, input.length, output);
             decoded1 = Arrays.copyOf(output, decodedLen);
-        } catch (LZFException | ArrayIndexOutOfBoundsException ignored) {
+        } catch (LZFException | RuntimeException e) {
+            failure1 = e.getClass();
         }
 
         // Repeat decoding, this time with (ignored) suffix and prefilled output
         // Should lead to same decoded result
         Arrays.fill(output, (byte) 0xFF);
         byte[] decoded2 = null;
+        Class<?> failure2 = null;
         try {
             int decodedLen = decoder.decode(input2, 0, input.length, output);
             decoded2 = Arrays.copyOf(output, decodedLen);
-        } catch (LZFException | ArrayIndexOutOfBoundsException ignored) {
+        } catch (LZFException | RuntimeException e) {
+            failure2 = e.getClass();
         }
 
         assertArrayEquals(decoded1, decoded2);
+        assertEquals(failure1, failure2);
 
         // Compare with result of vanilla decoder
-        // Note: only comparing decoded content, not the type of failure: `decode()` can pass a
-        // chunk end past the end of the input (for a chunk whose declared compressed length does
-        // not fit), which UnsafeChunkDecoder rejects as an invalid argument
-        // (ArrayIndexOutOfBoundsException) whereas VanillaChunkDecoder reports it as malformed
-        // content (LZFException). See `TestLZFDecoderParity` for the comparison with arguments
-        // that are known to be valid, which does require the same type of failure.
         byte[] decodedVanilla = null;
+        Class<?> failureVanilla = null;
         try {
             int decodedLen = new VanillaChunkDecoder().decode(input, output);
             decodedVanilla = Arrays.copyOf(output, decodedLen);
-        } catch (Exception ignored) {
+        } catch (LZFException | RuntimeException e) {
+            failureVanilla = e.getClass();
         }
         assertArrayEquals(decodedVanilla, decoded1);
-
+        // Note: comparing the type of failure as well, not just the decoded content: malformed
+        // content has to be reported as `LZFException` by both implementations, and comparing
+        // content alone would not catch one of them throwing an unchecked exception instead
+        assertEquals(failureVanilla, failure1);
     }
 
     @LZFFuzzTest

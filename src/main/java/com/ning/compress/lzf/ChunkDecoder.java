@@ -79,12 +79,18 @@ public abstract class ChunkDecoder
         int outPtr = 0;
         int blockNr = 0;
 
-        final int endMinusOne = inPtr + inLength - 1; // -1 to offset possible end marker
-        
+        final int inEnd = inPtr + inLength;
+        final int endMinusOne = inEnd - 1; // -1 to offset possible end marker
+
         while (inPtr < endMinusOne) {
             // let's do basic sanity checks; no point in skimping with these checks
             if (sourceBuffer[inPtr] != LZFChunk.BYTE_Z || sourceBuffer[inPtr+1] != LZFChunk.BYTE_V) {
                 throw new LZFException("Corrupt input data, block #"+blockNr+" (at offset "+inPtr+"): did not start with 'ZV' signature bytes");
+            }
+            // Verify that the header is fully available before reading it: otherwise a truncated
+            // block would be reported as `ArrayIndexOutOfBoundsException` instead of corrupt input
+            if ((inPtr + LZFChunk.HEADER_LEN_NOT_COMPRESSED) > inEnd) {
+                _reportTruncatedHeader(blockNr, inPtr);
             }
             inPtr += 2;
             int type = sourceBuffer[inPtr++];
@@ -94,14 +100,26 @@ public abstract class ChunkDecoder
                 if ((outPtr + len) > targetBuffer.length) {
                     _reportArrayOverflow(targetBuffer, outPtr, len);
                 }
+                if ((inPtr + len) > inEnd) {
+                    _reportIncompleteBlock(blockNr);
+                }
                 System.arraycopy(sourceBuffer, inPtr, targetBuffer, outPtr, len);
                 outPtr += len;
             } else { // compressed
+                // compressed blocks have 2 more header bytes, for uncompressed length
+                if ((inPtr + 2) > inEnd) {
+                    _reportTruncatedHeader(blockNr, inPtr);
+                }
                 int uncompLen = uint16(sourceBuffer, inPtr);
                 if ((outPtr + uncompLen) > targetBuffer.length) {
                     _reportArrayOverflow(targetBuffer, outPtr, uncompLen);
                 }
                 inPtr += 2;
+                // Content has to fit as well: passing an end offset past the end of input would
+                // be an invalid argument for `decodeChunk()`, not malformed content
+                if ((inPtr + len) > inEnd) {
+                    _reportIncompleteBlock(blockNr);
+                }
                 decodeChunk(sourceBuffer, inPtr, inPtr + len, targetBuffer, outPtr, outPtr+uncompLen);
                 outPtr += uncompLen;
             }
@@ -109,7 +127,7 @@ public abstract class ChunkDecoder
 
             // Fail if more input than expected was consumed, respectively if `inLength` does not include full block
             if (inPtr > endMinusOne + 1) {
-                throw new LZFException("Corrupt input data, block #" + blockNr + " is incomplete");
+                _reportIncompleteBlock(blockNr);
             }
             ++blockNr;
         }
@@ -305,5 +323,20 @@ public abstract class ChunkDecoder
     {
         throw new LZFException("Target buffer too small ("+targetBuffer.length+"): can not copy/uncompress "
                 +dataLen+" bytes to offset "+outPtr);
+    }
+
+    /**
+     * Helper method called when the header of a block extends past the end of available input
+     */
+    private void _reportTruncatedHeader(int blockNr, int offset) throws LZFException {
+        throw new LZFException("Corrupt input data, block #"+blockNr+" (at offset "+offset
+                +"): truncated block header");
+    }
+
+    /**
+     * Helper method called when the content of a block extends past the end of available input
+     */
+    private void _reportIncompleteBlock(int blockNr) throws LZFException {
+        throw new LZFException("Corrupt input data, block #"+blockNr+" is incomplete");
     }
 }
