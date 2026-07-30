@@ -33,6 +33,17 @@ public class UnsafeChunkDecoder extends ChunkDecoder
         }
     }
 
+    /**
+     * Maximum offset of a back-reference: 5 bits from the control byte, a full byte,
+     * and the implicit 1 -- so at most 8192 bytes back
+     */
+    private final static int MAX_BACK_REF_OFFSET = 8192;
+
+    /**
+     * Maximum run length of a back-reference: 255 + 9, for the long form
+     */
+    private final static int MAX_BACK_REF_LENGTH = 264;
+
     private static final long BYTE_ARRAY_OFFSET = unsafe.arrayBaseOffset(byte[].class);
 //    private static final long SHORT_ARRAY_OFFSET = unsafe.arrayBaseOffset(short[].class);
 //    private static final long SHORT_ARRAY_STRIDE = unsafe.arrayIndexScale(short[].class);
@@ -82,6 +93,12 @@ public class UnsafeChunkDecoder extends ChunkDecoder
 
         final int outPosStart = outPos;
 
+        // Back-reference offsets and run lengths are bounded, so checks against the start and the
+        // end of this chunk's output can only fail near them: in between they are provably
+        // redundant, and skipping them matters because this is the hot path
+        final int offsetChecksBefore = outPos + MAX_BACK_REF_OFFSET;
+        final int lengthChecksAfter = outEnd - MAX_BACK_REF_LENGTH;
+
         // We need to take care of end condition, leave last 32 bytes out
         final int inputEnd32 = inEnd - 32;
         final int outputEnd8 = outEnd - 8;
@@ -95,10 +112,12 @@ public class UnsafeChunkDecoder extends ChunkDecoder
             int ctrl = in[inPos++] & 255;
             while (ctrl < LZFChunk.MAX_LITERAL) { // literal run(s)
                 final int literalLength = ctrl + 1;
-                if (inPos > inEnd - literalLength || outPos > outEnd - literalLength) {
-                    throw new LZFException("Corrupt data: truncated block");
-                }
                 if (outPos > outputEnd32 || inPos > inputEnd32) {
+                    // Near the end of input or output: a literal run is at most 32 bytes long, so
+                    // before these bounds it provably fits and does not need to be checked
+                    if (inPos > inEnd - literalLength || outPos > outEnd - literalLength) {
+                        throw new LZFException("Corrupt data: truncated block");
+                    }
                     System.arraycopy(in, inPos, out, outPos, literalLength);
                 } else {
                     copyUpTo32(in, inPos, out, outPos, ctrl);
@@ -124,8 +143,10 @@ public class UnsafeChunkDecoder extends ChunkDecoder
                 }
                 ctrl -= in[inPos++] & 255;
                 final int copyLength = len + 2;
-                if (outPos > outEnd - copyLength || outPos + ctrl < outPosStart) {
-                    throw new LZFException("Invalid back reference");
+                if (outPos < offsetChecksBefore || outPos > lengthChecksAfter) {
+                    if (outPos > outEnd - copyLength || outPos + ctrl < outPosStart) {
+                        throw new LZFException("Invalid back reference");
+                    }
                 }
                 if (ctrl < -7 && outPos < outputEnd8) { // non-overlapping? can use efficient bulk copy
                     final long rawOffset = BYTE_ARRAY_OFFSET + outPos;
@@ -144,8 +165,10 @@ public class UnsafeChunkDecoder extends ChunkDecoder
             }
             len = (in[inPos++] & 255) + 9;
             ctrl -= in[inPos++] & 255;
-            if (outPos > outEnd - len || outPos + ctrl < outPosStart) {
-                throw new LZFException("Invalid back reference");
+            if (outPos < offsetChecksBefore || outPos > lengthChecksAfter) {
+                if (outPos > outEnd - len || outPos + ctrl < outPosStart) {
+                    throw new LZFException("Invalid back reference");
+                }
             }
             // First: overlapping case can't use default handling, handled off-line.
             if ((ctrl > -9) || (outPos > outputEnd32)) {
