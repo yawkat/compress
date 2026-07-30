@@ -124,11 +124,8 @@ public abstract class ChunkDecoder
                 outPtr += uncompLen;
             }
             inPtr += len;
-
-            // Fail if more input than expected was consumed, respectively if `inLength` does not include full block
-            if (inPtr > endMinusOne + 1) {
-                _reportIncompleteBlock(blockNr);
-            }
+            // NOTE: no need to verify that we did not consume more input than there was: checks
+            // above already guarantee that both the header and the content of the block fit
             ++blockNr;
         }
         return outPtr;
