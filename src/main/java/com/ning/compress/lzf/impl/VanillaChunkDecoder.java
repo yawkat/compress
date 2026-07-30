@@ -51,7 +51,10 @@ public class VanillaChunkDecoder extends ChunkDecoder
         throws LZFException
     {
         final int outStart = outPos;
-        while (outPos < outEnd) {
+        // NOTE: loop must be entered at least once, same as UnsafeChunkDecoder: a compressed
+        // chunk always has at least one control byte, so a chunk with no content at all
+        // (declared lengths of 0) is corrupt and must be reported as such by both decoders
+        do {
             if (inPos >= inEnd) {
                 throw new LZFException("Corrupt data: truncated block");
             }
@@ -151,7 +154,7 @@ public class VanillaChunkDecoder extends ChunkDecoder
             case 1:
                 out[outPos] = out[outPos++ + ctrl];
             }
-        }
+        } while (outPos < outEnd);
 
         // sanity check to guard against corrupt data:
         if (inPos != inEnd) {
